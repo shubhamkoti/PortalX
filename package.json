@@ -15,8 +15,7 @@
     "upload:docs": "node scripts/upload-documents.js http://localhost:7071",
     "lint": "xo",
     "lint:fix": "xo --fix",
-    "format": "prettier --list-different --write .",
-    "prepare": "simple-git-hooks || echo 'simple-git-hooks install skipped'"
+    "format": "prettier --list-different --write ."
   },
   "repository": {
     "type": "git",

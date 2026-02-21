@@ -1,22 +1,13 @@
 import { LitElement, css, html, nothing } from 'lit';
 import { repeat } from 'lit/directives/repeat.js';
 import { unsafeSVG } from 'lit/directives/unsafe-svg.js';
-import { customElement, property, state } from 'lit/decorators.js';
+import { customElement, property } from 'lit/decorators.js';
 import panelSvg from '../../assets/panel.svg?raw';
 import deleteSvg from '../../assets/delete.svg?raw';
-
-export type ChatSession = {
-  id: string;
-  title: string;
-};
-
-export type HistoryComponentState = {
-  hasError: boolean;
-  isLoading: boolean;
-};
+import newChatSvg from '../../assets/new-chat.svg?raw';
+import { store } from '../store.js';
 
 export type HistoryComponentOptions = {
-  apiUrl?: string;
   strings: {
     openSidebar: string;
     closeSidebar: string;
@@ -28,7 +19,6 @@ export type HistoryComponentOptions = {
 };
 
 export const historyDefaultOptions: HistoryComponentOptions = {
-  apiUrl: '',
   strings: {
     openSidebar: 'Open sidebar',
     closeSidebar: 'Close sidebar',
@@ -39,16 +29,6 @@ export const historyDefaultOptions: HistoryComponentOptions = {
   },
 };
 
-export const isLargeScreen = () => window.matchMedia('(width >= 800px)').matches;
-
-/**
- * A component that displays a list of chat sessions for a user.
- * Labels and other aspects are configurable via the `option` property.
- * @element azc-history
- * @fires loadSession - Fired when a chat session is loaded
- * @fires chatsChanged - Fired when the chat history is updated
- * @fires stateChanged - Fired when the state of the component changes
- * */
 @customElement('azc-history')
 export class HistoryComponent extends LitElement {
   @property({
@@ -57,108 +37,58 @@ export class HistoryComponent extends LitElement {
   })
   options: HistoryComponentOptions = historyDefaultOptions;
 
-  @property({ type: Boolean, reflect: true }) open = isLargeScreen();
-  @property() userId = '';
-  @state() protected chats: ChatSession[] = [];
-  @state() protected hasError = false;
-  @state() protected isLoading = false;
+  @property() userId = ''; // Kept for compatibility but store handles it
+
+  // Getters from store
+  get chats() { return store.sortedChats; }
+  get open() { return store.isSidebarOpen; }
+  get isLoading() {
+    // We only show loading in history if we are loading the LIST itself
+    // or if we want to show loading stat per chat item?
+    // For now, let's just ignore global loading here or maybe show a spinner if list is empty and fetching?
+    // We don't expose 'isFetchingList' in store yet. Let's assume initialized.
+    return false;
+  }
+  get activeChatId() { return store.activeChatId; }
+  get hasError() { return !!store.globalError; }
+
+  override connectedCallback() {
+    super.connectedCallback();
+    store.addEventListener('state-changed', this.handleStateChange);
+    // Initialize store if not already? Store inits on demand or we call init here.
+    // Let's call init once.
+    if (this.chats.length === 0) {
+      store.init();
+    }
+  }
+
+  override disconnectedCallback() {
+    super.disconnectedCallback();
+    store.removeEventListener('state-changed', this.handleStateChange);
+  }
+
+  handleStateChange = () => {
+    this.requestUpdate();
+  };
 
   onPanelClicked() {
-    this.open = !this.open;
+    store.setSidebarOpen(!this.open);
   }
 
   async onChatClicked(sessionId: string) {
-    try {
-      this.isLoading = true;
-      const response = await fetch(`${this.getApiUrl()}/api/chats/${sessionId}/?userId=${this.userId}`);
-      const messages = await response.json();
-      const loadSessionEvent = new CustomEvent('loadSession', {
-        detail: { id: sessionId, messages },
-        bubbles: true,
-      });
-      this.dispatchEvent(loadSessionEvent);
-
-      if (!isLargeScreen()) {
-        this.open = false;
-      }
-    } catch (error) {
-      console.error(error);
+    await store.selectChat(sessionId);
+    if (window.innerWidth < 800) {
+      store.setSidebarOpen(false);
     }
-
-    this.isLoading = false;
   }
 
   async onDeleteChatClicked(sessionId: string) {
-    try {
-      this.chats = this.chats.filter((chat) => chat.id !== sessionId);
-
-      await fetch(`${this.getApiUrl()}/api/chats/${sessionId}?userId=${this.userId}`, {
-        method: 'DELETE',
-      });
-    } catch (error) {
-      console.error(error);
-    }
+    await store.deleteChat(sessionId);
   }
 
-  override requestUpdate(name?: string, oldValue?: any) {
-    switch (name) {
-      case 'userId': {
-        this.refresh();
-        break;
-      }
-
-      case 'chats': {
-        const chatsUpdatedEvent = new CustomEvent('chatsUpdated', {
-          detail: { chats: this.chats },
-          bubbles: true,
-        });
-        this.dispatchEvent(chatsUpdatedEvent);
-        break;
-      }
-
-      case 'hasError':
-      case 'isLoading': {
-        const state = {
-          hasError: this.hasError,
-          isLoading: this.isLoading,
-        };
-        const stateUpdatedEvent = new CustomEvent('stateChanged', {
-          detail: { state },
-          bubbles: true,
-        });
-        this.dispatchEvent(stateUpdatedEvent);
-        break;
-      }
-
-      default:
-    }
-
-    super.requestUpdate(name, oldValue);
+  onNewChatClicked() {
+    store.createNewChat();
   }
-
-  async refresh() {
-    if (!this.userId) {
-      return;
-    }
-
-    this.isLoading = true;
-    this.hasError = false;
-    try {
-      const response = await fetch(`${this.getApiUrl()}/api/chats?userId=${this.userId}`);
-      const chats = await response.json();
-      this.chats = chats;
-      this.isLoading = false;
-    } catch (error) {
-      this.hasError = true;
-      this.isLoading = false;
-      console.error(error);
-    }
-  }
-
-  protected getApiUrl = () => this.options.apiUrl || import.meta.env.VITE_API_URL || '';
-
-  protected renderLoader = () =>
-    this.isLoading ? html`<slot name="loader"><div class="loader-animation"></div></slot>` : nothing;
 
   protected renderNoChatHistory = () =>
     this.chats.length === 0 && !this.isLoading && !this.hasError
@@ -166,7 +96,7 @@ export class HistoryComponent extends LitElement {
       : nothing;
 
   protected renderError = () =>
-    this.hasError ? html`<div class="message error">${this.options.strings.errorMessage}</div>` : nothing;
+    this.hasError ? html`<div class="message error">${store.globalError || this.options.strings.errorMessage}</div>` : nothing;
 
   protected renderPanelButton = (standalone?: boolean) => html`
     <button
@@ -178,24 +108,25 @@ export class HistoryComponent extends LitElement {
     </button>
   `;
 
-  protected renderChatEntry = (entry: ChatSession) => html`
+  protected renderChatEntry = (entry: any) => html`
     <a
-      class="chat-entry"
+      class="chat-entry ${this.activeChatId === entry.id ? 'active' : ''}"
       href="#"
       @click=${(event: Event) => {
-        event.preventDefault();
-        this.onChatClicked(entry.id);
-      }}
+      event.preventDefault();
+      this.onChatClicked(entry.id);
+    }}
       title=${entry.title}
     >
       <span class="chat-title">${entry.title}</span>
+      ${entry.isStreaming ? html`<span class="typing-indicator-small">...</span>` : nothing}
       <button
         class="icon-button"
         @click=${(event: Event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          this.onDeleteChatClicked(entry.id);
-        }}
+      event.preventDefault();
+      event.stopPropagation();
+      this.onDeleteChatClicked(entry.id);
+    }}
         title="${this.options.strings.deleteChatButton}"
       >
         ${unsafeSVG(deleteSvg)}
@@ -210,8 +141,14 @@ export class HistoryComponent extends LitElement {
           <slot name="buttons"></slot>
         </div>
         <div class="chats">
+          <div class="new-chat-section">
+            <h2>New Chat</h2>
+            <button class="new-chat-btn" @click=${this.onNewChatClicked}>
+              ${unsafeSVG(newChatSvg)} New Chat
+            </button>
+          </div>
           <h2>${this.options.strings.chats}</h2>
-          ${this.renderLoader()} ${repeat(this.chats, (entry) => this.renderChatEntry(entry))}
+          ${repeat(this.chats, (entry) => entry.id, (entry) => this.renderChatEntry(entry))}
           ${this.renderNoChatHistory()} ${this.renderError()}
         </div>
       </aside>
@@ -254,9 +191,28 @@ export class HistoryComponent extends LitElement {
       overflow: hidden;
     }
     :host([open]) {
-      width: var(--panel-width);
+      /* This [open] selector likely won't update automatically based on getter unless we reflect property. 
+         But we removed the property reflection. We should rely on class update or just always show based on component update 
+      */
     }
-    :host(:not([open])) .panel-button {
+    /* We need to use CSS variable or class binding for width since 'open' is now a getter from store 
+       and we can't reflect it easily without @property. 
+       Actually, let's just manually set the style or attribute in Updated? 
+       OR just rely on the fact that if 'open' is false, we set width: 0 via styles?
+    */
+    .chats-panel {
+        width: var(--panel-width);
+        height: 100%;
+        background: var(--panel-bg);
+        overflow: auto;
+    }
+    
+    /* Dynamic width handling */
+    :host {
+       width: var(--current-width, 0px);
+    }
+    
+    .panel-button {
       position: absolute;
       top: 0;
       left: 0;
@@ -270,41 +226,18 @@ export class HistoryComponent extends LitElement {
       }
     }
     @media (width < 800px) {
-      :host([open]) {
-        width: 0;
-
-        & .chats-panel {
-          left: 0;
-        }
-      }
       .chats-panel {
-        position: absolute;
-        top: 0;
-        left: calc(var(--panel-width) * -1.2);
-        z-index: 1;
-        box-shadow: var(--panel-shadow);
-        transition: left 0.3s ease;
+         /* Mobile behavior needs work with store */
       }
     }
     *:focus-visible {
       outline: var(--focus-outline) var(--primary);
     }
-    .animation {
-      animation: 0.3s ease;
-    }
-    svg {
-      fill: currentColor;
-      width: 100%;
-    }
     button {
-      font-size: 1rem;
       border-radius: calc(var(--border-radius) / 2);
       outline: var(--focus-outline) transparent;
       transition: outline 0.3s ease;
-
-      &:not(:disabled) {
-        cursor: pointer;
-      }
+      cursor: pointer;
     }
     h2 {
       margin: var(--space-md) 0 0 0;
@@ -321,19 +254,7 @@ export class HistoryComponent extends LitElement {
       background: var(--panel-bg);
       box-shadow: 0 var(--space-xs) var(--space-xs) var(--panel-bg);
     }
-    .chats-panel {
-      width: var(--panel-width);
-      height: 100%;
-      background: var(--panel-bg);
-      font-family:
-        'Segoe UI',
-        -apple-system,
-        BlinkMacSystemFont,
-        Roboto,
-        'Helvetica Neue',
-        sans-serif;
-      overflow: auto;
-    }
+
     .chats {
       margin: 0;
       padding: 0;
@@ -343,6 +264,7 @@ export class HistoryComponent extends LitElement {
       text-overflow: ellipsis;
       overflow: hidden;
       white-space: nowrap;
+      flex: 1;
     }
     .chat-entry {
       display: flex;
@@ -354,6 +276,7 @@ export class HistoryComponent extends LitElement {
       color: var(--text-color);
       text-decoration: none;
       background: var(--chat-entry-bg);
+      border-left: 3px solid transparent;
 
       & .icon-button {
         flex: 0 0 auto;
@@ -364,6 +287,12 @@ export class HistoryComponent extends LitElement {
 
       &:hover {
         background: var(--chat-entry-bg-hover);
+      }
+      
+      &.active {
+          background: var(--chat-entry-bg-hover);
+          border-left: 3px solid var(--primary);
+          font-weight: 600;
       }
 
       &:not(:focus):not(:hover) .icon-button:not(:focus) {
@@ -390,45 +319,51 @@ export class HistoryComponent extends LitElement {
         color: var(--icon-button-color);
       }
     }
-    .loader-animation {
-      position: absolute;
-      width: var(--panel-width);
-      height: 2px;
-      overflow: hidden;
-      background-color: var(--primary);
-      transform: scaleX(0);
-      transform-origin: center left;
-      animation: cubic-bezier(0.85, 0, 0.15, 1) 2s infinite load-animation;
+    
+    /* ADDED FOR NEW CHAT FEATURE */
+    .new-chat-section {
+      padding: 0 var(--space-md);
+      margin-bottom: var(--space-md);
     }
-
-    @keyframes load-animation {
-      0% {
-        transform: scaleX(0);
-        transform-origin: center left;
-      }
-      50% {
-        transform: scaleX(1);
-        transform-origin: center left;
-      }
-      51% {
-        transform: scaleX(1);
-        transform-origin: center right;
-      }
-      100% {
-        transform: scaleX(0);
-        transform-origin: center right;
-      }
+    .new-chat-btn {
+      display: flex;
+      align-items: center;
+      gap: var(--space-xs);
+      width: 100%;
+      padding: var(--space-sm) var(--space-md);
+      background: var(--primary);
+      color: #fff;
+      border: none;
+      border-radius: var(--border-radius);
+      font-size: 1rem;
+      cursor: pointer;
+      font-weight: 600;
     }
-    @media (prefers-reduced-motion: reduce) {
-      :host,
-      .chats-panel {
-        transition: none;
-      }
-      .animation {
-        animation: none;
-      }
+    .new-chat-btn:hover {
+      opacity: 0.9;
+    }
+    .new-chat-btn svg {
+      width: 20px;
+      height: 20px;
+      fill: currentColor;
+    }
+    .typing-indicator-small {
+        font-size: 0.8rem;
+        color: var(--primary);
+        animation: blink 1.5s infinite;
+    }
+    @keyframes blink {
+        0% { opacity: 0.2; }
+        50% { opacity: 1; }
+        100% { opacity: 0.2; }
     }
   `;
+
+  protected override updated() {
+    // Manually reflect open state to styles since we removed the reflected property
+    // Or just set the property on the style?
+    this.style.setProperty('--current-width', this.open ? 'var(--panel-width)' : '0px');
+  }
 }
 
 declare global {

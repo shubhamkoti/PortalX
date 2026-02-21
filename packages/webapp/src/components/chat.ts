@@ -2,19 +2,13 @@ import { LitElement, css, html, nothing } from 'lit';
 import { map } from 'lit/directives/map.js';
 import { repeat } from 'lit/directives/repeat.js';
 import { unsafeSVG } from 'lit/directives/unsafe-svg.js';
-import { customElement, property, state, query } from 'lit/decorators.js';
-import { AIChatCompletionDelta, AIChatMessage } from '@microsoft/ai-chat-protocol';
-import { type ChatRequestOptions, getCitationUrl, getCompletion } from '../api.js';
+import { customElement, property, query } from 'lit/decorators.js';
+import { type ChatRequestOptions, getCitationUrl } from '../api.js';
 import { type ParsedMessage, parseMessageIntoHtml } from '../message-parser.js';
 import sendSvg from '../../assets/send.svg?raw';
 import questionSvg from '../../assets/question.svg?raw';
 import newChatSvg from '../../assets/new-chat.svg?raw';
-
-export type ChatComponentState = {
-  hasError: boolean;
-  isLoading: boolean;
-  isStreaming: boolean;
-};
+import { store } from '../store.js';
 
 export type ChatComponentOptions = ChatRequestOptions & {
   enablePromptSuggestions: boolean;
@@ -39,35 +33,25 @@ export const chatDefaultOptions: ChatComponentOptions = {
   apiUrl: '',
   enablePromptSuggestions: true,
   promptSuggestions: [
-    'How to search and book rentals?',
-    'What is the refund policy?',
-    'How to contact a representative?',
+    'How do I improve my resume?',
+    'What are common interview questions?',
+    'Tips for finding an internship?',
   ],
   messages: [],
   strings: {
-    promptSuggestionsTitle: 'Ask anything or try an example',
-    citationsTitle: 'Citations:',
-    followUpQuestionsTitle: 'Follow-up questions:',
-    chatInputPlaceholder: 'Ask me anything...',
-    chatInputButtonLabel: 'Send question',
-    assistant: 'Support Assistant',
+    promptSuggestionsTitle: 'Ask Saarthi',
+    citationsTitle: 'Sources:',
+    followUpQuestionsTitle: 'Related questions:',
+    chatInputPlaceholder: 'Ask Saarthi anything about your career...',
+    chatInputButtonLabel: 'Send',
+    assistant: 'Saarthi',
     user: 'You',
-    errorMessage: 'We are currently experiencing an issue.',
+    errorMessage: 'Saarthi encountered an issue. Please try again.',
     newChatButton: 'New chat',
     retryButton: 'Retry',
   },
 };
 
-/**
- * A chat component that allows the user to ask questions and get answers from an API.
- * The component also displays default prompts that the user can click on to ask a question.
- * The component is built as a custom element that extends LitElement.
- *
- * Labels and other aspects are configurable via the `option` property.
- * @element azc-chat
- * @fires messagesUpdated - Fired when the message thread is updated
- * @fires stateChanged - Fired when the state of the component changes
- * */
 @customElement('azc-chat')
 export class ChatComponent extends LitElement {
   @property({
@@ -77,15 +61,31 @@ export class ChatComponent extends LitElement {
   options: ChatComponentOptions = chatDefaultOptions;
 
   @property() question = '';
-  @property({ type: Array }) messages: AIChatMessage[] = [];
-  @property() userId = '';
-  @property() sessionId = '';
-  @state() protected hasError = false;
-  @state() protected isLoading = false;
-  @state() protected isStreaming = false;
+
+  // Getters from store
+  get messages() { return store.activeChat?.messages || []; }
+  get isLoading() { return store.activeChat?.isLoading || false; }
+  get isStreaming() { return store.activeChat?.isStreaming || false; }
+  get hasError() { return store.activeChat?.hasError || false; }
+  get sessionId() { return store.activeChatId || ''; }
+
   @query('.chat-container') protected chatContainerElement!: HTMLElement;
   @query('.messages') protected messagesElement!: HTMLElement;
-  @query('.chat-input') protected chatInputElement!: HTMLElement;
+  @query('.chat-input-container') protected chatInputElement!: HTMLElement;
+
+  override connectedCallback() {
+    super.connectedCallback();
+    store.addEventListener('state-changed', this.handleStateChange);
+  }
+
+  override disconnectedCallback() {
+    super.disconnectedCallback();
+    store.removeEventListener('state-changed', this.handleStateChange);
+  }
+
+  handleStateChange = () => {
+    this.requestUpdate();
+  };
 
   async onSuggestionClicked(suggestion: string) {
     this.question = suggestion;
@@ -98,112 +98,64 @@ export class ChatComponent extends LitElement {
   }
 
   onNewChatClicked() {
-    this.messages = [];
-    this.sessionId = '';
-    this.fireMessagesUpdatedEvent();
+    store.createNewChat();
   }
 
   async onKeyPressed(event: KeyboardEvent) {
-    if (event.key === 'Enter') {
+    // Check for Enter without Shift
+    if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
       await this.onSendClicked();
     }
   }
 
   async onSendClicked(isRetry = false) {
-    if (this.isLoading) {
+    if (this.isLoading && !isRetry) {
       return;
     }
 
-    this.hasError = false;
+    const content = this.question;
+
+    // If input is empty and not retrying, do nothing
+    if (!content.trim() && !isRetry) return;
+
     if (!isRetry) {
-      this.messages = [
-        ...this.messages,
-        {
-          content: this.question,
-          role: 'user',
-        },
-      ];
+      this.question = '';
     }
 
-    this.question = '';
-    this.isLoading = true;
-    this.scrollToLastMessage();
-    try {
-      const response = getCompletion({
-        ...this.options,
-        messages: this.messages,
-        context: {
-          userId: this.userId,
-          sessionId: this.sessionId,
-        },
-      });
-      const chunks = response as AsyncGenerator<AIChatCompletionDelta>;
-      const { messages } = this;
-      const message: AIChatMessage = {
-        content: '',
-        role: 'assistant',
-      };
-      for await (const chunk of chunks) {
-        if (chunk.delta.content) {
-          this.isStreaming = true;
-          message.content += chunk.delta.content;
-          this.messages = [...messages, message];
-        }
+    this.scrollToLastMessage(true);
 
-        const sessionId = (chunk.context as any)?.sessionId;
-        if (!this.sessionId && sessionId) {
-          this.sessionId = sessionId;
-        }
-      }
+    // Send via store
+    await store.sendMessage(content || (store.activeChat?.messages.at(-1)?.content ?? ''));
 
-      this.isLoading = false;
-      this.isStreaming = false;
-      this.fireMessagesUpdatedEvent();
-    } catch (error) {
-      this.hasError = true;
-      this.isLoading = false;
-      this.isStreaming = false;
-      console.error(error);
-    }
+    this.scrollToLastMessage(true);
   }
 
   override requestUpdate(name?: string, oldValue?: any) {
-    if (name === 'messages') {
-      this.scrollToLastMessage();
-    } else if (name === 'hasError' || name === 'isLoading' || name === 'isStreaming') {
-      const state = {
-        hasError: this.hasError,
-        isLoading: this.isLoading,
-        isStreaming: this.isStreaming,
-      };
-      const stateUpdatedEvent = new CustomEvent('stateChanged', {
-        detail: { state },
-        bubbles: true,
-      });
-      this.dispatchEvent(stateUpdatedEvent);
-    }
-
+    // If messages length changed (implied by store update), we might want to scroll
     super.requestUpdate(name, oldValue);
   }
 
-  protected fireMessagesUpdatedEvent() {
-    const messagesUpdatedEvent = new CustomEvent('messagesUpdated', {
-      detail: { messages: this.messages },
-      bubbles: true,
-    });
-    this.dispatchEvent(messagesUpdatedEvent);
+  protected override updated(changedProperties: Map<string | number | symbol, unknown>) {
+    super.updated(changedProperties);
+    if (this.isStreaming) {
+      this.scrollToLastMessage();
+    }
   }
 
-  protected scrollToLastMessage() {
-    // Need to be delayed to run after the DOM refresh
-    setTimeout(() => {
-      const { bottom } = this.messagesElement.getBoundingClientRect();
-      const { top } = this.chatInputElement.getBoundingClientRect();
-      if (bottom > top) {
-        this.chatContainerElement.scrollBy(0, bottom - top);
+  protected scrollToLastMessage(force = false) {
+    requestAnimationFrame(() => {
+      if (!this.chatContainerElement) return;
+
+      const container = this.chatContainerElement;
+      const threshold = 150;
+      const distanceToBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+      const isNearBottom = distanceToBottom < threshold;
+
+      if (force || isNearBottom) {
+        container.scrollTop = container.scrollHeight;
       }
-    }, 0);
+    });
   }
 
   protected renderSuggestions = (suggestions: string[]) => html`
@@ -211,18 +163,18 @@ export class ChatComponent extends LitElement {
       <h2>${this.options.strings.promptSuggestionsTitle}</h2>
       <div class="suggestions">
         ${map(
-          suggestions,
-          (suggestion) => html`
+    suggestions,
+    (suggestion) => html`
             <button
               class="suggestion"
               @click=${async () => {
-                await this.onSuggestionClicked(suggestion);
-              }}
+        await this.onSuggestionClicked(suggestion);
+      }}
             >
               ${suggestion}
             </button>
           `,
-        )}
+  )}
       </div>
     </section>
   `;
@@ -232,7 +184,10 @@ export class ChatComponent extends LitElement {
       ? html`
           <div class="message assistant loader">
             <div class="message-body">
-              <slot name="loader"><div class="loader-animation"></div></slot>
+              <div class="typing-indicator">
+                 <span>Thinking...</span>
+                 <slot name="loader"><div class="loader-animation"></div></slot>
+              </div>
               <div class="message-role">${this.options.strings.assistant}</div>
             </div>
           </div>
@@ -245,13 +200,13 @@ export class ChatComponent extends LitElement {
       <div class="message-body">
         <div class="content">${message.html}</div>
         ${message.citations.length > 0
-          ? html`
+      ? html`
               <div class="citations">
                 <div class="citations-title">${this.options.strings.citationsTitle}</div>
                 ${map(message.citations, this.renderCitation)}
               </div>
             `
-          : nothing}
+      : nothing}
       </div>
       <div class="message-role">
         ${message.role === 'user' ? this.options.strings.user : this.options.strings.assistant}
@@ -287,31 +242,29 @@ export class ChatComponent extends LitElement {
             <span class="question-icon" title=${this.options.strings.followUpQuestionsTitle}>
               ${unsafeSVG(questionSvg)} </span
             >${map(
-              questions,
-              (question) => html`
+        questions,
+        (question) => html`
                 <button
                   class="question animation"
                   @click=${async () => {
-                    await this.onSuggestionClicked(question);
-                  }}
+            await this.onSuggestionClicked(question);
+          }}
                 >
                   ${question}
                 </button>
               `,
-            )}
+      )}
           </div>
         `
       : nothing;
 
   protected renderChatInput = () => html`
-    <div class="chat-input">
+    <div class="chat-input-container">
       <button
-        class="button new-chat-button"
-        @click=${() => {
-          this.onNewChatClicked();
-        }}
-        title=${this.options.strings.newChatButton}
-        .disabled=${this.messages?.length === 0 || this.isLoading || this.isStreaming}
+        class="new-chat-button"
+        @click=${() => this.onNewChatClicked()}
+        title="${this.options.strings.newChatButton}"
+        .disabled=${this.isLoading}
       >
         ${unsafeSVG(newChatSvg)}
       </button>
@@ -321,9 +274,9 @@ export class ChatComponent extends LitElement {
           placeholder="${this.options.strings.chatInputPlaceholder}"
           .value=${this.question}
           autocomplete="off"
-          @input=${(event) => {
-            this.question = event.target.value;
-          }}
+          @input=${(event: any) => {
+      this.question = event.target.value;
+    }}
           @keypress=${this.onKeyPressed}
           .disabled=${this.isLoading}
         ></textarea>
@@ -340,14 +293,16 @@ export class ChatComponent extends LitElement {
   `;
 
   protected override render() {
+    // Only render messages for the active chat
     const parsedMessages = this.messages.map((message) => parseMessageIntoHtml(message, this.renderCitationReference));
+
     return html`
       <section class="chat-container">
         ${this.options.enablePromptSuggestions &&
         this.options.promptSuggestions.length > 0 &&
         this.messages.length === 0
-          ? this.renderSuggestions(this.options.promptSuggestions)
-          : nothing}
+        ? this.renderSuggestions(this.options.promptSuggestions)
+        : nothing}
         <div class="messages">
           ${repeat(parsedMessages, (_, index) => index, this.renderMessage)} ${this.renderLoader()}
           ${this.hasError ? this.renderError() : nothing}
@@ -360,6 +315,7 @@ export class ChatComponent extends LitElement {
 
   static override styles = css`
     :host {
+      display: block; /* FIX: make entire chat container scrollable */
       /* Base properties */
       --primary: var(--azc-primary, #07f);
       --error: var(--azc-error, #e30);
@@ -432,6 +388,7 @@ export class ChatComponent extends LitElement {
       }
     }
     .chat-container {
+      width: 100%; /* FIX: ensure full width for scroll */
       height: 100cqh;
       overflow: auto;
       container-type: inline-size;
@@ -493,6 +450,7 @@ export class ChatComponent extends LitElement {
       display: flex;
       flex-direction: column;
       gap: var(--space-md);
+      padding-bottom: 80px; /* Ensure space for fixed input */
     }
     .user {
       align-self: end;
@@ -607,7 +565,7 @@ export class ChatComponent extends LitElement {
     .error-message {
       flex: 1;
     }
-    .chat-input {
+    .chat-input-container {
       position: sticky;
       bottom: 0;
       padding: var(--space-xl);
@@ -667,6 +625,14 @@ export class ChatComponent extends LitElement {
         opacity: 0.7;
       }
     }
+    .typing-indicator {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-xs);
+      color: var(--text-color);
+      font-style: italic;
+      font-size: 0.9rem;
+    }
     .loader-animation {
       width: 100px;
       height: 4px;
@@ -696,36 +662,10 @@ export class ChatComponent extends LitElement {
         transform-origin: center right;
       }
     }
-    @keyframes fade-in-up {
-      0% {
-        opacity: 0.5;
-        top: 100px;
-      }
-      100% {
-        opacity: 1;
-        top: 0px;
-      }
-    }
-    @keyframes fade-in-right {
-      0% {
-        opacity: 0.5;
-        right: -100px;
-      }
-      100% {
-        opacity: 1;
-        right: 0;
-      }
-    }
     @media (prefers-reduced-motion: reduce) {
       .animation {
         animation: none;
       }
     }
   `;
-}
-
-declare global {
-  interface HTMLElementTagNameMap {
-    'azc-chat': ChatComponent;
-  }
 }
